@@ -21,10 +21,11 @@
 using namespace std;
 const string FILENAME = "omnical_redcal.cc";
 const float PI = atan2(0, -1);
-const float UBLPRECISION = pow(10, -3);
-const float MIN_NONE_ZERO = pow(10, -10);
-const float MAX_NONE_INF = pow(10, 10);
-const float MAX_POW_2 = pow(10, 10); //limiting the base of ^2 to be 10^10
+const float CONVMIN = pow(float(10),-5)*3;
+const float UBLPRECISION = pow(float(10), float(-3));
+const float MIN_NONE_ZERO = pow(float(10), float(-10));
+const float MAX_NONE_INF = pow(float(10), float(10));
+const float MAX_POW_2 = pow(float(10), float(10)); //limiting the base of ^2 to be 10^10
 
 void initcalmodule(calmemmodule* module, redundantinfo* info){
 	int nant = info->nAntenna;
@@ -119,17 +120,7 @@ float norm(vector<vector<float> > * v){
 			res += pow(v->at(i)[j], 2);
 		}
 	}
-	return pow(res, 0.5);
-}
-
-float norm(vector<vector<float> > * v, vector<float> * stdev){
-	float res = 0;
-	for (unsigned int i = 0; i < v->size(); i++){
-		for (unsigned int j = 0; j < v->at(i).size(); j++){
-			res += pow(v->at(i)[j] / stdev->at(i), 2);
-		}
-	}
-	return pow(res, 0.5);
+	return pow(float(res), float(0.5));
 }
 
 float phase(vector<float> * c){
@@ -493,10 +484,7 @@ vector<float> minimizecomplex(vector<vector<float> >* a, vector<vector<float> >*
 	return sum1;
 }
 
-void logcaladd(vector<vector<float> >* data, vector<float>* stdev, vector<vector<float> >* additivein, redundantinfo* info, vector<float>* calpar, vector<vector<float> >* additiveout, int computeUBLFit, int compute_calpar, calmemmodule* module){//if computeUBLFit is 1, compute the ubl estimates given data and calpars, rather than read ubl estimates from input
-	//NOTE: logcal currently is not taking advantage of stdev in the calculations of solutions, only using stdev in calculating chi^2.
-    //To add that we need to add stdev into th calculation of At and AtAi and B counterparts in info calculation. No need to touch C++ code.
-
+void logcaladd(vector<vector<float> >* data, vector<vector<float> >* additivein, redundantinfo* info, vector<float>* calpar, vector<vector<float> >* additiveout, int computeUBLFit, int compute_calpar, calmemmodule* module){//if computeUBLFit is 1, compute the ubl estimates given data and calpars, rather than read ubl estimates from input
 	int nubl = info->ublindex.size();
     int ai, aj; // antenna indices
 	////initialize data and g0 ubl0
@@ -507,7 +495,7 @@ void logcaladd(vector<vector<float> >* data, vector<float>* stdev, vector<vector
 	float amptmp;
 	unsigned int cbl;
 	for (int a = 0; a < info->nAntenna; a++){
-		amptmp = pow(10, calpar->at(3 + a));
+		amptmp = pow(float(10), calpar->at(3 + a));
 		module->g0[a][0] = amptmp * cos(calpar->at(3 + info->nAntenna + a));
 		module->g0[a][1] = amptmp * sin(calpar->at(3 + info->nAntenna + a));
 	}
@@ -552,25 +540,21 @@ void logcaladd(vector<vector<float> >* data, vector<float>* stdev, vector<vector
 		module->pha1[b] = phaseWrap(phase(data->at(b)[0] - additivein->at(b)[0], data->at(b)[1] - additivein->at(b)[1]) + calpar->at(3 + nant + ai) - calpar->at(3 + nant + aj));
 	}
 
-
-//	////rewrap args//old way
-//	for(int i = 0; i < nubl; i ++){
-//		for (uint j = 0; j < (module->ublgrp1)[i].size(); j ++){
-//			(module->ublgrp1)[i][j] = module->pha1[info->ublindex[i][j]];
-//		}
-//	}
-//
-//	for (int i = 0; i < nubl; i++){
-//		(module->ubl1)[i][1] = medianAngle(&((module->ublgrp1)[i]));
-//	}
-//
-//	for (int b = 0; b < ncross; b++) {
-//		module->pha1[b] = phaseWrap(module->pha1[b], (module->ubl1)[info->bltoubl[b]][1] - PI);
-//	}
-    //rewrap args//new way
-	for (int b = 0; b < ncross; b++) {
-		module->pha1[b] = phaseWrap(module->pha1[b], phase(&(module->ubl0[info->bltoubl[b]])) - PI);
+	////rewrap args//TODO: use module->ubl0
+	for(int i = 0; i < nubl; i ++){
+		for (uint j = 0; j < (module->ublgrp1)[i].size(); j ++){
+			(module->ublgrp1)[i][j] = module->pha1[info->ublindex[i][j]];
+		}
 	}
+
+	for (int i = 0; i < nubl; i++){
+		(module->ubl1)[i][1] = medianAngle(&((module->ublgrp1)[i]));
+	}
+
+	for (int b = 0; b < ncross; b++) {
+		module->pha1[b] = phaseWrap(module->pha1[b], (module->ubl1)[info->bltoubl[b]][1] - PI);
+	}
+
 	fill(module->x3.begin(), module->x3.end(), 0);////At.y
 	for (unsigned int i = 0; i < info->Atsparse.size(); i++){
 		for (unsigned int j = 0; j < info->Atsparse[i].size(); j++){
@@ -592,14 +576,14 @@ void logcaladd(vector<vector<float> >* data, vector<float>* stdev, vector<vector
 	for(int b = 0; b < ncross; b++) {
 		ai = info->bl2d[b][0];
 		aj = info->bl2d[b][1];
-		float amp = pow(10, module->x1[nant + info->bltoubl[b]] + module->x1[ai] + module->x1[aj] + calpar->at(3 + ai) + calpar->at(3 + aj));
+		float amp = pow(float(10), module->x1[nant + info->bltoubl[b]] + module->x1[ai] + module->x1[aj] + calpar->at(3 + ai) + calpar->at(3 + aj));
 		float phase =  module->x2[nant + info->bltoubl[b]] - module->x2[ai] + module->x2[aj] - calpar->at(3 + nant + ai) + calpar->at(3 + nant + aj);
 		additiveout->at(b)[0] = data->at(b)[0] - amp * cos(phase);
 		additiveout->at(b)[1] = data->at(b)[1] - amp * sin(phase);
 	}
 	if(compute_calpar == 0){////compute additive term only
-		calpar->at(1) = pow(norm(additiveout, stdev), 2);
-		//cout << norm(additiveout, stdev) << endl;
+		calpar->at(1) = pow(norm(additiveout), 2);
+		//cout << norm(additiveout) << endl;
 		return;
 	} else if(compute_calpar == 1){////compute full set of calpars
 		for(int a = 0; a < nant; a++){
@@ -607,18 +591,17 @@ void logcaladd(vector<vector<float> >* data, vector<float>* stdev, vector<vector
 			calpar->at(3 + nant + a) += module->x2[a];
 		}
 		for(int u = 0; u < nubl; u++){
-			calpar->at(3 + 2 * nant + 2 * u) = pow(10, module->x1[nant + u]) * cos(module->x2[nant + u]);
-			calpar->at(3 + 2 * nant + 2 * u + 1) = pow(10, module->x1[nant + u]) * sin(module->x2[nant + u]);
+			calpar->at(3 + 2 * nant + 2 * u) = pow(float(10), module->x1[nant + u]) * cos(module->x2[nant + u]);
+			calpar->at(3 + 2 * nant + 2 * u + 1) = pow(float(10), module->x1[nant + u]) * sin(module->x2[nant + u]);
 		}
-		calpar->at(1) = pow(norm(additiveout, stdev), 2);
+		calpar->at(1) = pow(norm(additiveout), 2);
 	}
 	return;
 }
 
 
 
-void lincal(vector<vector<float> >* data, vector<float>* stdev, vector<vector<float> >* additivein, redundantinfo* info, vector<float>* calpar, vector<vector<float> >* additiveout, int computeUBLFit, calmemmodule* module, float convergethresh, int maxiter, float stepsize){
-
+int lincal(vector<vector<float> >* data, vector<vector<float> >* additivein, redundantinfo* info, vector<float>* calpar, vector<vector<float> >* additiveout, int computeUBLFit, calmemmodule* module, float convergethresh, int maxiter, float stepsize){
 	int nubl = info->ublindex.size();
     int ai, aj; // antenna indices
 	////initialize data and g0 ubl0
@@ -630,7 +613,7 @@ void lincal(vector<vector<float> >* data, vector<float>* stdev, vector<vector<fl
 	unsigned int cbl;
 	float stepsize2 = 1 - stepsize;
 	for (int a = 0; a < info->nAntenna; a++){
-		amptmp = pow(10, calpar->at(3 + a));
+		amptmp = pow(float(10), calpar->at(3 + a));
 		module->g0[a][0] = amptmp * cos(calpar->at(3 + info->nAntenna + a));
 		module->g0[a][1] = amptmp * sin(calpar->at(3 + info->nAntenna + a));
 	}
@@ -644,10 +627,10 @@ void lincal(vector<vector<float> >* data, vector<float>* stdev, vector<vector<fl
 			for (unsigned int i = 0; i < module->ubl2dgrp1[u].size(); i++){
 				cbl = info->ublindex[u][i];
                 ai = info->bl2d[cbl][0]; aj = info->bl2d[cbl][1];
-				module->ubl2dgrp1[u][i][0] = module->cdata1[cbl][0] / stdev->at(cbl);
-				module->ubl2dgrp1[u][i][1] = module->cdata1[cbl][1] / stdev->at(cbl);
-				module->ubl2dgrp2[u][i][0] = (module->g0[ai][0] * module->g0[aj][0] + module->g0[ai][1] * module->g0[aj][1]) / stdev->at(cbl);
-				module->ubl2dgrp2[u][i][1] = (module->g0[ai][0] * module->g0[aj][1] - module->g0[ai][1] * module->g0[aj][0]) / stdev->at(cbl);
+				module->ubl2dgrp1[u][i][0] = module->cdata1[cbl][0];
+				module->ubl2dgrp1[u][i][1] = module->cdata1[cbl][1];
+				module->ubl2dgrp2[u][i][0] = module->g0[ai][0] * module->g0[aj][0] + module->g0[ai][1] * module->g0[aj][1];
+				module->ubl2dgrp2[u][i][1] = (module->g0[ai][0] * module->g0[aj][1] - module->g0[ai][1] * module->g0[aj][0]);
 			}
 
 			module->ubl0[u] = minimizecomplex(&(module->ubl2dgrp1[u]), &(module->ubl2dgrp2[u]));
@@ -655,8 +638,11 @@ void lincal(vector<vector<float> >* data, vector<float>* stdev, vector<vector<fl
 	}
 
 	float gre, gim, starting_chisq, chisq, chisq2, delta;
-	int a1, a2; // antenna indices
+	int a1, a2, u12; // antenna indices
 	chisq = 0;
+    int na = info->nAntenna;
+    int Nparam = nubl + na;
+    int Nmeasure = (module->cdata2).size();
 	for (unsigned int b = 0; b < (module->cdata2).size(); b++){
 		a1 = info->bl2d[b][0];
 		a2 = info->bl2d[b][1];
@@ -667,7 +653,9 @@ void lincal(vector<vector<float> >* data, vector<float>* stdev, vector<vector<fl
 		//module->cdata2[b][1] = gre * module->ubl0[info->bltoubl[b]][1] * info->reversed[b] + gim * module->ubl0[info->bltoubl[b]][0];
 		module->cdata2[b][1] = gre * module->ubl0[info->bltoubl[b]][1] + gim * module->ubl0[info->bltoubl[b]][0];
 		delta = (pow(module->cdata2[b][0] - module->cdata1[b][0], 2) + pow(module->cdata2[b][1] - module->cdata1[b][1], 2));
-		chisq += delta / pow(stdev->at(b), 2);
+		chisq += delta;
+        //cout << "bl:" << a1 << " " << a2 << "  ubl: " << info->bltoubl[b] << endl<<flush;
+        // XXX have a starting_chisq_ant?
 		//if (delta != 0){
 			//cout << delta << " " << module->cdata2[b][0]-1 << " " << module->cdata2[b][1] << " " << module->ubl0[info->bltoubl[b]][0]-1 << " " << module->ubl0[info->bltoubl[b]][1] * info->reversed[b] << " " <<  a1 << " " <<  a2 << " " <<  b << " " << info->reversed[b] << endl;
 		//}
@@ -680,9 +668,15 @@ void lincal(vector<vector<float> >* data, vector<float>* stdev, vector<vector<fl
 
 	////start iterations
 	int iter = 0;
+        int iter2 = 0;
 	float componentchange = 100;
-	while(iter < maxiter and componentchange > convergethresh){
+	while(iter < maxiter and stepsize > convergethresh){
+                if (chisq == 0){
+			componentchange = -1;
+                	break;
+                }
 		iter++;
+                iter2++;
 		//cout << "iteration #" << iter << endl; cout.flush();
 		////calpar g
 
@@ -694,19 +688,18 @@ void lincal(vector<vector<float> >* data, vector<float>* stdev, vector<vector<fl
 					module->g1[a] = vector<float>(2,0);
 					module->g2[a] = vector<float>(2,0);
 				}else if(info->bl2d[cbl][1] == a3){
-					module->g1[a][0] = module->cdata1[cbl][0] / stdev->at(cbl);
-					module->g1[a][1] = module->cdata1[cbl][1] / stdev->at(cbl);
+					module->g1[a] = module->cdata1[cbl];
 					//module->g2[a][0] = (module->g0[a][0] * module->ubl0[info->bltoubl[cbl]][0] + module->g0[a][1] * module->ubl0[info->bltoubl[cbl]][1] * info->reversed[cbl]);
-					module->g2[a][0] = (module->g0[a][0] * module->ubl0[info->bltoubl[cbl]][0] + module->g0[a][1] * module->ubl0[info->bltoubl[cbl]][1]) / stdev->at(cbl);
+					module->g2[a][0] = (module->g0[a][0] * module->ubl0[info->bltoubl[cbl]][0] + module->g0[a][1] * module->ubl0[info->bltoubl[cbl]][1]);
 					//module->g2[a][1] = (module->g0[a][0] * module->ubl0[info->bltoubl[cbl]][1] * info->reversed[cbl] - module->g0[a][1] * module->ubl0[info->bltoubl[cbl]][0]);
-					module->g2[a][1] = (module->g0[a][0] * module->ubl0[info->bltoubl[cbl]][1] - module->g0[a][1] * module->ubl0[info->bltoubl[cbl]][0]) / stdev->at(cbl);
+					module->g2[a][1] = (module->g0[a][0] * module->ubl0[info->bltoubl[cbl]][1] - module->g0[a][1] * module->ubl0[info->bltoubl[cbl]][0]);
 				}else{
-					module->g1[a][0] = module->cdata1[cbl][0] / stdev->at(cbl);
-					module->g1[a][1] = -module->cdata1[cbl][1] / stdev->at(cbl);////vij needs to be conjugated
+					module->g1[a][0] = module->cdata1[cbl][0];
+					module->g1[a][1] = -module->cdata1[cbl][1];////vij needs to be conjugated
 					//module->g2[a][0] = (module->g0[a][0] * module->ubl0[info->bltoubl[cbl]][0] + module->g0[a][1] * module->ubl0[info->bltoubl[cbl]][1] * (-info->reversed[cbl]));////Mi-j needs to be conjugated
-					module->g2[a][0] = (module->g0[a][0] * module->ubl0[info->bltoubl[cbl]][0] + module->g0[a][1] * module->ubl0[info->bltoubl[cbl]][1] * (-1)) / stdev->at(cbl);////Mi-j needs to be conjugated
+					module->g2[a][0] = (module->g0[a][0] * module->ubl0[info->bltoubl[cbl]][0] + module->g0[a][1] * module->ubl0[info->bltoubl[cbl]][1] * (-1));////Mi-j needs to be conjugated
 					//module->g2[a][1] = (module->g0[a][0] * module->ubl0[info->bltoubl[cbl]][1] * (-info->reversed[cbl]) - module->g0[a][1] * module->ubl0[info->bltoubl[cbl]][0]);
-					module->g2[a][1] = (module->g0[a][0] * module->ubl0[info->bltoubl[cbl]][1] * (-1) - module->g0[a][1] * module->ubl0[info->bltoubl[cbl]][0]) / stdev->at(cbl);
+					module->g2[a][1] = (module->g0[a][0] * module->ubl0[info->bltoubl[cbl]][1] * (-1) - module->g0[a][1] * module->ubl0[info->bltoubl[cbl]][0]);
 				}
 			}
 			//(module->g1)[a3] = vector<float>(2,0);
@@ -731,10 +724,10 @@ void lincal(vector<vector<float> >* data, vector<float>* stdev, vector<vector<fl
 			for (unsigned int i = 0; i < module->ubl2dgrp1[u].size(); i++){
 				cbl = info->ublindex[u][i];
                 ai = info->bl2d[cbl][0]; aj = info->bl2d[cbl][1];
-				module->ubl2dgrp1[u][i][0] = module->cdata1[cbl][0] / stdev->at(cbl);
-				module->ubl2dgrp1[u][i][1] = module->cdata1[cbl][1] / stdev->at(cbl);
-				module->ubl2dgrp2[u][i][0] = (module->g0[ai][0] * module->g0[aj][0] + module->g0[ai][1] * module->g0[aj][1]) / stdev->at(cbl);
-				module->ubl2dgrp2[u][i][1] = (module->g0[ai][0] * module->g0[aj][1] - module->g0[ai][1] * module->g0[aj][0]) / stdev->at(cbl);
+				module->ubl2dgrp1[u][i][0] = module->cdata1[cbl][0];
+				module->ubl2dgrp1[u][i][1] = module->cdata1[cbl][1] ;
+				module->ubl2dgrp2[u][i][0] = module->g0[ai][0] * module->g0[aj][0] + module->g0[ai][1] * module->g0[aj][1];
+				module->ubl2dgrp2[u][i][1] = (module->g0[ai][0] * module->g0[aj][1] - module->g0[ai][1] * module->g0[aj][0]);
 			}
 
 			module->ubl3[u] = minimizecomplex(&(module->ubl2dgrp1[u]), &(module->ubl2dgrp2[u]));
@@ -765,7 +758,7 @@ void lincal(vector<vector<float> >* data, vector<float>* stdev, vector<vector<fl
 				gim = module->g0[a1][0] * module->g0[a2][1] - module->g0[a1][1] * module->g0[a2][0];
 				module->cdata2[b][0] = gre * module->ubl0[info->bltoubl[b]][0] - gim * module->ubl0[info->bltoubl[b]][1];
 				module->cdata2[b][1] = gre * module->ubl0[info->bltoubl[b]][1] + gim * module->ubl0[info->bltoubl[b]][0];
-				chisq2 += (pow(module->cdata2[b][0] - module->cdata1[b][0], 2) + pow(module->cdata2[b][1] - module->cdata1[b][1], 2)) / pow(stdev->at(b), 2);
+				chisq2 += (pow(module->cdata2[b][0] - module->cdata1[b][0], 2) + pow(module->cdata2[b][1] - module->cdata1[b][1], 2));
 			}
 		}
 		componentchange = (chisq - chisq2) / chisq;
@@ -777,17 +770,17 @@ void lincal(vector<vector<float> >* data, vector<float>* stdev, vector<vector<fl
 				for (unsigned int i = 0; i < module->ubl2dgrp1[u].size(); i++){
 					cbl = info->ublindex[u][i];
                     ai = info->bl2d[cbl][0]; aj = info->bl2d[cbl][1];
-					module->ubl2dgrp1[u][i][0] = module->cdata1[cbl][0] / stdev->at(cbl);
-					module->ubl2dgrp1[u][i][1] = module->cdata1[cbl][1] / stdev->at(cbl);
-					module->ubl2dgrp2[u][i][0] = (module->g0[ai][0] * module->g0[aj][0] + module->g0[ai][1] * module->g0[aj][1]) / stdev->at(cbl);
-					module->ubl2dgrp2[u][i][1] = (module->g0[ai][0] * module->g0[aj][1] - module->g0[ai][1] * module->g0[aj][0]) / stdev->at(cbl);
+					module->ubl2dgrp1[u][i][0] = module->cdata1[cbl][0];
+					module->ubl2dgrp1[u][i][1] = module->cdata1[cbl][1];
+					module->ubl2dgrp2[u][i][0] = module->g0[ai][0] * module->g0[aj][0] + module->g0[ai][1] * module->g0[aj][1];
+					module->ubl2dgrp2[u][i][1] = (module->g0[ai][0] * module->g0[aj][1] - module->g0[ai][1] * module->g0[aj][0]);
 				}
 				module->ubl3[u] = minimizecomplex(&(module->ubl2dgrp1[u]), &(module->ubl2dgrp2[u]));
 				module->ubl0[u][0] = module->ubl3[u][0];
 				module->ubl0[u][1] = module->ubl3[u][1];
 			}
 		} else {//reverse g0 and ubl0 changes
-			iter--;
+			iter2--;
 			for (unsigned int a = 0; a < module->g3.size(); a++){
 				module->g0[a][0] = (module->g0[a][0] - stepsize * module->g3[a][0]) / stepsize2;
 				module->g0[a][1] = (module->g0[a][1] - stepsize * module->g3[a][1]) / stepsize2;
@@ -799,12 +792,69 @@ void lincal(vector<vector<float> >* data, vector<float>* stdev, vector<vector<fl
 					module->ubl0[u][1] = (module->ubl0[u][1] - stepsize * module->ubl3[u][1]) / stepsize2;
 				}
 			}
+                        stepsize /= 2;
+                        stepsize2 = 1 - stepsize;
 		}
 	}
 
 
 	////update calpar and additive term
-	if(componentchange > 0 or iter > 1){
+	if(componentchange > 0 or iter2 > 1){
+        //new stuff
+//        MatrixXf A = MatrixXf::Zero(2*Nmeasure,2*Nparam);
+//        VectorXf M = VectorXf::Zero(2*Nmeasure);
+//        VectorXf S = VectorXf::Zero(2*Nparam);
+//        float fracchange = 10;
+//        int iter3 = 0;
+//        float gi_gj_r, gi_gj_i, gi_yij_r, gi_yij_i, gjyij_r, gjyij_i;
+//        while(iter3 < maxiter and fracchange > CONVMIN){
+//            iter3++;
+//            for (unsigned int b = 0; b < (module->cdata2).size(); b++){
+//                a1 = info->bl2d[b][0];
+//                a2 = info->bl2d[b][1];
+//                u12 = info->bltoubl[b];
+//                gi_gj_r = module->g0[a1][0] * module->g0[a2][0] + module->g0[a1][1] * module->g0[a2][1];
+//                gi_gj_i = module->g0[a1][0] * module->g0[a2][1] - module->g0[a1][1] * module->g0[a2][0];
+//                gi_yij_r = module->g0[a1][0] * module->ubl0[u12][0] + module->g0[a1][1] * module->ubl0[u12][1];
+//                gi_yij_i = module->g0[a1][0] * module->ubl0[u12][1] - module->g0[a1][1] * module->ubl0[u12][0];
+//                gjyij_r = module->g0[a2][0] * module->ubl0[u12][0] - module->g0[a2][1] * module->ubl0[u12][1];
+//                gjyij_i = module->g0[a2][0] * module->ubl0[u12][1] + module->g0[a2][1] * module->ubl0[u12][0];
+//                module->cdata2[b][0] = gi_gj_r*module->ubl0[u12][0] - gi_gj_i*module->ubl0[u12][1];
+//                module->cdata2[b][1] = gi_gj_r*module->ubl0[u12][1] + gi_gj_i*module->ubl0[u12][0];
+//                A(2*b,2*a1) = gjyij_r;
+//                A(2*b,2*a1+1) = gjyij_i;
+//                A(2*b,2*a2) = gi_yij_r;
+//                A(2*b,2*a2+1) = -gi_yij_i;
+//                A(2*b,2*na+2*u12) = gi_gj_r;
+//                A(2*b,2*na+2*u12+1) = -gi_gj_i;
+//                A(2*b+1,2*a1) = gjyij_i;
+//                A(2*b+1,2*a1+1) = -gjyij_r;
+//                A(2*b+1,2*a2) = gi_yij_i;
+//                A(2*b+1,2*a2+1) = gi_yij_r;
+//                A(2*b+1,2*na+2*u12) = gi_gj_i;
+//                A(2*b+1,2*na+2*u12+1) = gi_gj_r;
+//                M(2*b) = module->cdata1[b][0] - module->cdata2[b][0];
+//                M(2*b+1) = module->cdata1[b][1] - module->cdata2[b][1];
+//            }
+//            S = A.jacobiSvd(ComputeThinU | ComputeThinV).solve(M);
+//            float maxchange = 0, change;
+//            for (unsigned int a = 0; a < na; a++){
+//                change = sqrt(S(2*a)*S(2*a)+S(2*a+1)*S(2*a+1))/amp(&(module->g0[a]));
+//                if(change > maxchange){maxchange = change;}
+//                module->g0[a][0] += S(2*a);
+//                module->g0[a][1] += S(2*a+1);
+//            }
+//            for (unsigned int u = 0; u < nubl; u++){
+//                change = sqrt(S(2*na+2*u)*S(2*na+2*u)+S(2*na+2*u+1)*S(2*na+2*u+1))/amp(&(module->ubl0[u]));
+//                if(change > maxchange){maxchange = change;};
+//                module->ubl0[u][0] += S(2*na+2*u);
+//                module->ubl0[u][1] += S(2*na+2*u+1);
+//            }
+//            fracchange = maxchange;
+//            cout << "fchange: " << fracchange << endl;
+//        }
+//        cout << "iter3: " << iter3 << endl << flush;
+        
 		for (unsigned int a = 0; a < module->g0.size(); a++){
 			calpar->at(3 + a) = log10(amp(&(module->g0[a])));
 			calpar->at(3 + info->nAntenna + a) = phase(&(module->g0[a]));
@@ -821,28 +871,30 @@ void lincal(vector<vector<float> >* data, vector<float>* stdev, vector<vector<fl
 			additiveout->at(b)[0] = module->cdata1[b][0] - module->cdata2[b][0];
 			additiveout->at(b)[1] = module->cdata1[b][1] - module->cdata2[b][1];
 		}
+        // Create a chisq for each antenna. Right now, this is done at every time and
+        // frequency, since that's how lincal is called, but that can be summed later
+        // over all times and frequencies to get a chisq for each antenna.
+        int chisq_ant = 3 + 2*(info -> nAntenna + nubl);
+        for (int b = 0; b < (module -> cdata2).size(); b++){
+            delta  = pow(module->cdata2[b][0] - module->cdata1[b][0], 2);
+            delta += pow(module->cdata2[b][1] - module->cdata1[b][1], 2);
+            a1 = info->bl2d[b][0];
+            a2 = info->bl2d[b][1];
+            calpar -> at(chisq_ant + a1) += delta;
+            calpar -> at(chisq_ant + a2) += delta;
+        }
+	
 	}else{////if chisq didnt decrease, keep everything untouched
 		calpar->at(0) += 0;
 		calpar->at(2) = starting_chisq;
+        // XXX do we need to put a dummy value in for chisq per ant?
 	}
 
-	// Create a chisq for each antenna. Right now, this is done at every time and
-	// frequency, since that's how lincal is called, but that can be summed later
-	// over all times and frequencies to get a chisq for each antenna.
-	int chisq_ant = 3 + 2*(info -> nAntenna + nubl);
-	for (int b = 0; b < (module -> cdata2).size(); b++){
-		delta  = pow(module->cdata2[b][0] - module->cdata1[b][0], 2);
-		delta += pow(module->cdata2[b][1] - module->cdata1[b][1], 2);
-		delta /= pow(stdev->at(b), 2);
-		a1 = info->bl2d[b][0];
-		a2 = info->bl2d[b][1];
-		calpar -> at(chisq_ant + a1) += delta;
-		calpar -> at(chisq_ant + a2) += delta;
-    }
-	
 	//cout << "lincal DBG v "  << module->cdata1[DBGbl][0] << " " << module->cdata1[DBGbl][1] << endl<<flush;
 	//cout << "lincal DBG c0g0g0 "  << module->cdata2[DBGbl][0] << " " << module->cdata2[DBGbl][1] << endl<<flush;
-	return;
+        //cout << stepsize << endl<<flush;
+        //cout << componentchange << endl<<flush;
+	return iter;
 }
 
 
@@ -858,7 +910,7 @@ void gaincal(vector<vector<float> >* data, vector<vector<float> >* additivein, r
 	unsigned int cbl;
 	float stepsize2 = 1 - stepsize;
 	for (int a = 0; a < info->nAntenna; a++){
-		amptmp = pow(10, calpar->at(3 + a));
+		amptmp = pow(float(10), calpar->at(3 + a));
 		module->g0[a][0] = amptmp * cos(calpar->at(3 + info->nAntenna + a));
 		module->g0[a][1] = amptmp * sin(calpar->at(3 + info->nAntenna + a));
 	}
@@ -970,12 +1022,15 @@ void gaincal(vector<vector<float> >* data, vector<vector<float> >* additivein, r
 		if (componentchange > 0){//if improved, keep g0 and ubl0 updates, and update single-bl ubls and chisq
 			chisq = chisq2;
 		} else {//reverse g0 and ubl0 changes
-			iter--;
+	//		iter--;
 			for (unsigned int a = 0; a < module->g3.size(); a++){
 				module->g0[a][0] = (module->g0[a][0] - stepsize * module->g3[a][0]) / stepsize2;
 				module->g0[a][1] = (module->g0[a][1] - stepsize * module->g3[a][1]) / stepsize2;
 			}
 		}
+                stepsize /= 2;
+                stepsize2 = 1 - stepsize;
+                componentchange = 1;
 	}
 
 
@@ -998,6 +1053,7 @@ void gaincal(vector<vector<float> >* data, vector<vector<float> >* additivein, r
 	}
 	//cout << "lincal DBG v "  << module->cdata1[DBGbl][0] << " " << module->cdata1[DBGbl][1] << endl<<flush;
 	//cout << "lincal DBG c0g0g0 "  << module->cdata2[DBGbl][0] << " " << module->cdata2[DBGbl][1] << endl<<flush;
+        cout << 'gaincal DBG  '<< stepsize << endl<<flush;
 	return;
 }
 
@@ -1029,7 +1085,7 @@ void removeDegen(vector<float> *calpar, redundantinfo * info, calmemmodule* modu
 	////compute amp delta
 	float ampfactor = 0;//average |g|, divide ant calpar by this, multiply ublfit by square this
 	for (int a = 0 ; a < info->nAntenna; a ++){
-		ampfactor += pow(10, calpar->at(3 + a));
+		ampfactor += pow(float(10), calpar->at(3 + a));
 	}
 	ampfactor = ampfactor / info->nAntenna;
 	//cout << ampfactor << endl;

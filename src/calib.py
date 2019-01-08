@@ -8,7 +8,8 @@ import struct
 import numpy as np
 import os, sys
 import _omnical as _O
-from info import RedundantInfo
+from copy import deepcopy
+import info
 from arrayinfo import ArrayInfo, ArrayInfoLegacy
 import warnings
 with warnings.catch_warnings():
@@ -22,12 +23,93 @@ with warnings.catch_warnings():
         print "WARNING: using scipy's nanmedian function with is much slower than numpy.nanmedian. Consider numpy 1.9+."
         from scipy.stats import nanmedian
 
-__version__ = '4.0.4'
+__version__ = '5.0.2'
 
 julDelta = 2415020.# =julian date - pyephem's Observer date
-cal_name = {0: "Lincal", 1: "Logcal"}
 PI = np.pi
-TPI = np.pi * 2
+
+class FirstCalRedundantInfo(info.FirstCalRedundantInfo):
+    def order_data(self, dd):
+        '''Create a data array ordered for use in _omnical.redcal.  'dd' is
+        a dict whose keys are (i,j) antenna tuples; antennas i,j should be ordered to reflect
+        the conjugation convention of the provided data.  'dd' values are 2D arrays
+        of (time,freq) data.''' # XXX does time/freq ordering matter.  should data be 2D instead?
+        return np.array([dd[bl] if dd.has_key(bl) else dd[bl[::-1]].conj()
+            for bl in self.bl_order()]).transpose((1,2,0))
+
+
+class RedundantInfo(info.RedundantInfo):
+    def __init__(self, filename=None):
+        info.RedundantInfo.__init__(self, filename)
+
+    def calpar_size(self, nant, nubl, has_chi2ant=True):
+        """
+        Quickly compute the size of the calpar array.
+        """
+        return 3 + 2*(nant+nubl) + bool(has_chi2ant)*nant
+
+    def order_data(self, dd):
+        '''Create a data array ordered for use in _omnical.redcal.  'dd' is
+        a dict whose keys are (i,j) antenna tuples; antennas i,j should be ordered to reflect
+        the conjugation convention of the provided data.  'dd' values are 2D arrays
+        of (time,freq) data.''' # XXX does time/freq ordering matter.  should data be 2D instead?
+        return np.array([dd[bl] if dd.has_key(bl) else dd[bl[::-1]].conj()
+            for bl in self.bl_order()]).transpose((1,2,0))
+
+    def pack_calpar(self, calpar, gains=None, vis=None):
+        '''Pack gain solutions and/or model visibilities for baseline types into a 'calpar' array that follows
+        the internal data order used by omnical.  This function facilitates wrapping _omnical.redcal to
+        abstract away internal data ordering when providing initial guesses for antenna gains and
+        visibilities for ubls.
+        self: a RedundantInfo object
+        calpar: the appropriately (time,freq,3+2*(nant+nubl)+nant) shaped array into which gains/vis will be copied
+        gains: dictionary of antenna number: gain solution (vs time,freq)
+        vis: dictionary of baseline: model visibility (vs time,freq).  baseline is cross-indexed to the appropriate
+        baseline, so only one representative of each ubl type should be provided.'''
+        assert(calpar.shape[-1] == self.calpar_size(self.nAntenna, len(self.ublcount)))
+        nant = self.nAntenna
+
+        if gains is not None:
+            for i,ai in enumerate(self.subsetant):
+                if not gains.has_key(ai): continue
+                amp = np.log10(np.abs(gains[ai])); amp.shape = ((1,) + amp.shape)[-2:]
+                # XXX does phs need to be conjugated b/c omnical & aipy don't have same conj convention?
+                phs = np.angle(gains[ai]); phs.shape = ((1,) + phs.shape)[-2:] 
+                calpar[...,3+i], calpar[...,3+nant+i] = amp, phs
+        if vis is not None:
+            for (ai,aj),v in vis.iteritems():
+                i,j = self.ant_index(ai), self.ant_index(aj)
+                n = self.bl1dmatrix[i,j] # index of this bl in self.bl2d
+                u = self.bltoubl[n] # index of ubl that this bl corresponds to
+                if tuple(self.bl2d[n]) != (i,j): # check if bl reversed wrt ubl
+                    assert(tuple(self.bl2d[n]) == (j,i))
+                    v = v.conj()
+                # XXX possible that frombuffer might do this a bit more efficiently
+                calpar[...,3+2*nant+2*u] = v.real # interleave real/imag
+                calpar[...,3+2*nant+2*u+1] = v.imag
+        return calpar
+
+    def unpack_calpar(self, calpar, res=None):
+        '''Parse the calpar result from omnical (complementary to pack_calpar).
+        Result is parsed into meta, gains, and vis dicts which are returned.  meta has keys 'iter' and
+        'chisq', gains as keys of antenna number, and vis has unique baseline solutions, indexed by a
+        representative baseline.'''
+        meta, gains, vis = {}, {}, {}
+        meta['iter'],meta['chisq'] = calpar[...,0], calpar[...,2]
+        chisq_per_ant = calpar[...,self.calpar_size(self.nAntenna, len(self.ublcount), False):]
+        for i,ai in enumerate(self.subsetant):
+            gains[ai] = 10**calpar[...,3+i] * np.exp(1j*calpar[...,3+self.nAntenna+i])
+            meta['chisq%d' % (ai)] = chisq_per_ant[...,i]
+        for u in xrange(len(self.ublcount)):
+            # XXX possible that frombuffer might do this a bit more efficiently
+            v = calpar[...,3+2*self.nAntenna+2*u] + 1j*calpar[...,3+2*self.nAntenna+2*u+1]
+            n = self.ublindex[np.sum(self.ublcount[:u])]
+            i,j = self.bl2d[n]
+            vis[(self.subsetant[i],self.subsetant[j])] = v
+        if res is not None:
+            res = dict(zip(map(tuple,self.subsetant[self.bl2d]), res.transpose([2,0,1])))
+            meta['res'] = res
+        return meta, gains, vis
 
 # XXX maybe omnical should only solve one time at a time, so that prev sol can be used as starting point for next time
 
@@ -42,88 +124,118 @@ TPI = np.pi * 2
 # will be over time and frequency, as in the input data array
 # XXX is the omnical baseline convention conjugated wrt aipy?  I think so
 
-def calpar_size(nant, nubl):
-    """
-    Quickly compute the size of the calpar array.
-    """
-    return 3 + 2*(nant+nubl) + nant
+# def calpar_size(nant, nubl, has_chi2ant=True):
+#     """
+#     Quickly compute the size of the calpar array.
+#     """
+#     return 3 + 2*(nant+nubl) + bool(has_chi2ant)*nant
+# 
+# def pack_calpar(info, calpar, gains=None, vis=None):
+#     '''Pack gain solutions and/or model visibilities for baseline types into a 'calpar' array that follows
+#     the internal data order used by omnical.  This function facilitates wrapping _omnical.redcal to
+#     abstract away internal data ordering when providing initial guesses for antenna gains and
+#     visibilities for ubls.
+#     info: a RedundantInfo object
+#     calpar: the appropriately (time,freq,3+2*(nant+nubl)+nant) shaped array into which gains/vis will be copied
+#     gains: dictionary of antenna number: gain solution (vs time,freq)
+#     vis: dictionary of baseline: model visibility (vs time,freq).  baseline is cross-indexed to the appropriate
+# aseline, so only one representative of each ubl type should be provided.'''
+#     assert(calpar.shape[-1] == calpar_size(info.nAntenna, len(info.ublcount)))
+#     nant = info.nAntenna
+#     if gains is not None:
+#         for i,ai in enumerate(info.subsetant):
+#             if not gains.has_key(ai): continue
+#             amp = np.log10(np.abs(gains[ai])); amp.shape = ((1,) + amp.shape)[-2:]
+#             # XXX does phs need to be conjugated b/c omnical & aipy don't have same conj convention?
+#             phs = np.angle(gains[ai]); phs.shape = ((1,) + phs.shape)[-2:]
+#             calpar[...,3+i], calpar[...,3+nant+i] = amp, phs
+#     if vis is not None:
+#         for (ai,aj),v in vis.iteritems():
+#             i,j = info.ant_index(ai), info.ant_index(aj)
+#             n = info.bl1dmatrix[i,j] # index of this bl in info.bl2d
+#             u = info.bltoubl[n] # index of ubl that this bl corresponds to
+#             if tuple(info.bl2d[n]) != (i,j): # check if bl reversed wrt ubl
+#                 assert(tuple(info.bl2d[n]) == (j,i))
+#                 v = v.conj()
+#             # XXX possible that frombuffer might do this a bit more efficiently
+#             calpar[...,3+2*nant+2*u] = v.real # interleave real/imag
+#             calpar[...,3+2*nant+2*u+1] = v.imag
+#     return calpar
+# 
+# def unpack_calpar(info, calpar):
+#     '''Parse the calpar result from omnical (complementary to pack_calpar).
+#     Result is parsed into meta, gains, and vis dicts which are returned.  meta has keys 'iter' and
+#     'chisq', gains as keys of antenna number, and vis has unique baseline solutions, indexed by a
+#     representative baseline.'''
+#     meta, gains, vis = {}, {}, {}
+#     meta['iter'],meta['chisq'] = calpar[...,0], calpar[...,2]
+#     chisq_per_ant = calpar[...,calpar_size(info.nAntenna, len(info.ublcount), False):]
+#     for i,ai in enumerate(info.subsetant):
+#         gains[ai] = 10**calpar[...,3+i] * np.exp(1j*calpar[...,3+info.nAntenna+i])
+#         meta['chisq%d' % (ai)] = chisq_per_ant[...,i]
+#     for u in xrange(len(info.ublcount)):
+#         # XXX possible that frombuffer might do this a bit more efficiently
+#         v = calpar[...,3+2*info.nAntenna+2*u] + 1j*calpar[...,3+2*info.nAntenna+2*u+1]
+#         n = info.ublindex[np.sum(info.ublcount[:u])]
+#         i,j = info.bl2d[n]
+#         vis[(info.subsetant[i],info.subsetant[j])] = v
+#     return meta, gains, vis
 
-def pack_calpar(info, calpar, gains=None, vis=None):
-    '''Pack gain solutions and/or model visibilities for baseline types into a 'calpar' array that follows
-    the internal data order used by omnical.  This function facilitates wrapping _omnical.redcal to
-    abstract away internal data ordering when providing initial guesses for antenna gains and
-    visibilities for ubls.
-    info: a RedundantInfo object
-    calpar: the appropriately (time,freq,3+2*(nant+nubl)+nant) shaped array into which gains/vis will be copied
-    gains: dictionary of antenna number: gain solution (vs time,freq)
-    vis: dictionary of baseline: model visibility (vs time,freq).  baseline is cross-indexed to the appropriate
-        unique baseline, so only one representative of each ubl type should be provided.'''
-    assert(calpar.shape[-1] == calpar_size(info.nAntenna, len(info.ublcount)))
-    nant = info.nAntenna
-    if gains is not None:
-        for i,ai in enumerate(info.subsetant):
-            if not gains.has_key(ai): continue
-            amp = np.log10(np.abs(gains[ai])); amp.shape = ((1,) + amp.shape)[-2:]
-            # XXX does phs need to be conjugated b/c omnical & aipy don't have same conj convention?
-            phs = np.angle(gains[ai]); phs.shape = ((1,) + phs.shape)[-2:]
-            calpar[...,3+i], calpar[...,3+nant+i] = amp, phs
-    if vis is not None:
-        for (i,j),v in vis.iteritems():
-            n = info.bl1dmatrix[i,j] # index of this bl in info.bl2d
-            u = info.bltoubl[n] # index of ubl that this bl corresponds to
-            if tuple(info.bl2d[n]) != (i,j): # check if bl reversed wrt ubl
-                assert(tuple(info.bl2d[n]) == (j,i))
-                v = v.conj()
-            # XXX possible that frombuffer might do this a bit more efficiently
-            calpar[...,3+2*nant+2*u] = v.real # interleave real/imag
-            calpar[...,3+2*nant+2*u+1] = v.imag
-    return calpar
-
-def unpack_calpar(info, calpar):
-    '''Parse the calpar result from omnical (complementary to pack_calpar).
-    Result is parsed into meta, gains, and vis dicts which are returned.  meta has keys 'iter' and
-    'chisq', gains as keys of antenna number, and vis has unique baseline solutions, indexed by a
-    representative baseline.'''
-    meta, gains, vis = {}, {}, {}
-    meta['iter'],_,meta['chisq'] = calpar[...,0], calpar[...,1], calpar[...,2] # XXX do we need "1"?
-    for i,ai in enumerate(info.subsetant):
-        gains[ai] = 10**calpar[...,3+i] * np.exp(1j*calpar[...,3+info.nAntenna+i])
-    for u in xrange(len(info.ublcount)):
-        # XXX possible that frombuffer might do this a bit more efficiently
-        v = calpar[...,3+2*info.nAntenna+2*u] + 1j*calpar[...,3+2*info.nAntenna+2*u+1]
-        n = info.ublindex[np.sum(info.ublcount[:u])]
-        i,j = info.bl2d[n]
-        vis[(i,j)] = v
-    return meta, gains, vis
-
-def redcal(data, info, stdev=None, xtalk=None, gains=None, vis=None,
-        removedegen=False, uselogcal=True, maxiter=50, conv=1e-3, stepsize=.3, computeUBLFit=True, trust_period=1):
+def redcal(data, info, xtalk=None, gains=None, vis=None,
+        removedegen=True, uselogcal=True, uselincal=True, maxiter=50, conv=1e-3, stepsize=.3, trust_period=1, **kwargs):
     '''Perform redundant calibration, parsing results into meta, gains, and vis dicts which are returned.  This
     function wraps _omnical.redcal to abstract away internal data ordering.  'data' is a dict of measured visibilities,
     indexed by baseline.  Initial guesses for xtalk, antenna gains,
     and unique baselines may be passed in through xtalk, gains, and vis dictionaries, respectively.'''
-    #NOTE: logcal currently is not taking advantage of stdev, only using stdev in calculating chi^2.
-    #To add that we need to add stdev into th calculation of At and AtAi and B counterparts in info calculation. No need to touch C++ code.
-
     data = info.order_data(data) # put data into
-    calpar = np.zeros((data.shape[0],data.shape[1], calpar_size(info.nAntenna, len(info.ublcount))), dtype=np.float32)
-    pack_calpar(info, calpar, gains=gains, vis=vis)
+    calpar = np.zeros((data.shape[0],data.shape[1], info.calpar_size(info.nAntenna, len(info.ublcount))), dtype=np.float32)
+    info.pack_calpar(calpar, gains=gains, vis=vis, **kwargs)
     if xtalk is None: xtalk = np.zeros_like(data) # crosstalk (aka "additivein/out") will be overwritten
     else: xtalk = info.order_data(xtalk)
-    if stdev is None:
-        stdev = np.ones(data.shape[-1], dtype='float32')
     res = _O.redcal(data, calpar, info, xtalk,
-        stdev=stdev, removedegen=int(removedegen), uselogcal=int(uselogcal), maxiter=int(maxiter),
-        conv=float(conv), stepsize=float(stepsize), computeUBLFit=int(computeUBLFit),
-        trust_period=int(trust_period))
-    meta, gains, vis = unpack_calpar(info, calpar)
-    res = dict(zip(map(tuple,info.subsetant[info.bl2d]), res.transpose([2,0,1])))
-    meta['res'] = res
+        removedegen=int(removedegen), uselogcal=int(uselogcal), uselincal=int(uselincal),
+        maxiter=int(maxiter), conv=float(conv), stepsize=float(stepsize),
+        computeUBLFit=int(vis is None), trust_period=int(trust_period))
+    meta, gains, vis = info.unpack_calpar(calpar, res=res, **kwargs)
     return meta, gains, vis
 
 # TODO: wrap _O._redcal to return calpar parsed up sensibly
 # considerations: _redcal starts with calpar as a starting place.  Do we need the ability to go
 # from parsed solutions back to calpar?  if so, might want an object that holds calpar and parses accordingly
+
+
+def logcal(data, info, gains=None, xtalk=None, maxiter=50, conv=1e-3, stepsize=.3, trust_period=1):
+    '''Perform logcal. Calls redcal() function with logcal=True.'''
+
+    m, g, v = redcal(data, info, gains=gains, uselogcal=True, uselincal=False, removedegen=False, xtalk=xtalk,
+                     conv=conv, stepsize=stepsize,
+                     trust_period=trust_period, maxiter=maxiter)
+
+    return m, g, v
+
+
+def lincal(data, info, gains=None, vis=None, xtalk=None, maxiter=50, conv=1e-3,
+           stepsize=.3, trust_period=1):
+    '''Perform lincal. Calls redcal() function with lincal=True.'''
+
+    m, g, v = redcal(data, info, gains=gains, vis=vis, uselincal=True, uselogcal=False, removedegen=False, xtalk=xtalk,
+                     conv=conv, stepsize=stepsize,
+                     trust_period=trust_period, maxiter=maxiter)
+
+    return m, g, v
+
+
+def removedegen(data, info, gains, vis, **kwargs):
+    '''Run removedegen by calling redcal with removedegen=True'''
+    # XXX make data an optional parameter into redcal
+
+    m, g, v = redcal(data, info, gains=gains, vis=vis, removedegen=True, uselogcal=False, uselincal=False, **kwargs)
+
+    return m, g, v
+
+
+
+
 
 
 # XXX if calpar is parsed into a sensible format, then apply_calpar functions should not be necessary.
@@ -212,17 +324,15 @@ def apply_calpar2(data, calpar, calpar2, visibilityID):
 #    opomnigain.tofile(outputPath + '.omnigain')
 #    opomnifit.tofile(outputPath + '.omnifit')
 
-def _redcal(data, rawCalpar, Info, additivein, additive_out, stdev=None, removedegen=0, uselogcal=1, maxiter=50, conv=1e-3, stepsize=.3, computeUBLFit=1, trust_period=1):
+def _redcal(data, rawCalpar, Info, additivein, additive_out, removedegen=0, uselogcal=1, maxiter=50, conv=1e-3, stepsize=.3, computeUBLFit=1, trust_period=1):
     # XXX with merge of _omnical.redcal and _omnical.redcal2, is this function still necessary?
     '''same as _O.redcal, but does not return additiveout. Rather it puts additiveout into an inputted container.  this is the target of RedundantCalibrator._redcal_multithread'''
     np_rawCalpar = np.frombuffer(rawCalpar, dtype=np.float32)
     np_rawCalpar.shape=(data.shape[0], data.shape[1], len(rawCalpar) / data.shape[0] / data.shape[1])
     np_additive_out = np.frombuffer(additive_out, dtype=np.complex64)
     np_additive_out.shape = data.shape
-    if stdev is None:
-        stdev = np.ones(data.shape[-1], dtype='float32')
     # XXX Why is np_additive_out used here instead of additive_out?
-    _O.redcal(data, np_rawCalpar, Info, additivein, np_additive_out, stdev=stdev, removedegen=removedegen, uselogcal=uselogcal, maxiter=int(maxiter), conv=float(conv), stepsize=float(stepsize), computeUBLFit = int(computeUBLFit), trust_period = int(trust_period))
+    _O.redcal(data, np_rawCalpar, Info, additivein, np_additive_out, removedegen=removedegen, uselogcal=uselogcal, maxiter=int(maxiter), conv=float(conv), stepsize=float(stepsize), computeUBLFit = int(computeUBLFit), trust_period = int(trust_period))
 
     #np_additive_out = _O.redcal(data, np_rawCalpar, Info, additivein, removedegen=removedegen, uselogcal=uselogcal, maxiter=int(maxiter), conv=float(conv), stepsize=float(stepsize), computeUBLFit = int(computeUBLFit), trust_period = int(trust_period))
     #additive_out[:len(additive_out)/2] = np.real(np_additive_out.flatten())
@@ -263,6 +373,11 @@ class RedundantCalibrator:
         if info is not None: # XXX what is the point of leaving info == None?
             if type(info) == str: self.read_redundantinfo(info)
             else: self.Info = info
+    def calpar_size(self, nant, nubl, has_chi2ant=True):
+        """
+        Quickly compute the size of the calpar array.
+        """
+        return 3 + 2*(nant+nubl) + bool(has_chi2ant)*nant 
     def read_redundantinfo(self, filename, txtmode=False, verbose=False):
         '''redundantinfo is necessary for running redundant calibration. The text file
         should contain 29 lines each describes one item in the info.'''
@@ -274,31 +389,27 @@ class RedundantCalibrator:
         self.Info.to_npz(filename)
     #def read_arrayinfo(self, arrayinfopath, verbose = False):
     #    return self.arrayinfo.read_arrayinfo(arrayinfopath,verbose=verbose) # XXX if works, clean up
-    def _redcal(self, data, additivein, stdev=None, nthread=1, verbose=False, uselogcal=0):
+    def _redcal(self, data, additivein, nthread=None, verbose=False, uselogcal=0, uselincal=0):
         '''for best performance, try setting nthread to larger than number of cores.'''
         #assert(data.ndim == 3 and data.shape[-1] == len(self.arrayinfo.totalVisibilityId))
         #assert(data.shape == additivein.shape) # XXX is this taken care of in wrapper?
         self.nTime, self.nFrequency = data.shape[:2]
         nUBL = len(self.Info.ublcount)
-        if self.rawCalpar is None:
-            self.rawCalpar = np.zeros((self.nTime, self.nFrequency, calpar_size(self.Info.nAntenna, nUBL)), dtype=np.float32)
-        assert(self.rawCalpar.shape == (self.nTime,self.nFrequency, calpar_size(self.Info.nAntenna, nUBL)))
+        if uselogcal or self.rawCalpar is None:
+            self.rawCalpar = np.zeros((self.nTime, self.nFrequency, self.calpar_size(self.Info.nAntenna, nUBL)), dtype=np.float32)
+        assert(self.rawCalpar.shape == (self.nTime,self.nFrequency, self.calpar_size(self.Info.nAntenna, nUBL)))
         if nthread is None: nthread = min(mp.cpu_count() - 1, self.nFrequency)
         if nthread >= 2: return self._redcal_multithread(data, additivein, 0, nthread, verbose=verbose)
-        if stdev is None:
-            stdev = np.ones(data.shape[-1], dtype='float32')
         return _O.redcal(data, self.rawCalpar, self.Info,
-            additivein, stdev=stdev, removedegen=int(self.removeDegeneracy), uselogcal=uselogcal,
+            additivein, removedegen=int(self.removeDegeneracy), uselogcal=uselogcal, uselincal=uselincal,
             maxiter=int(self.maxIteration), conv=float(self.convergePercent), stepsize=float(self.stepSize),
             computeUBLFit=int(self.computeUBLFit), trust_period=self.trust_period)
-    def lincal(self, data, additivein, stdev=None, nthread=None, verbose=False):
+    def lincal(self, data, additivein, nthread=None, verbose=False):
         '''XXX DOCSTRING'''
-        return self._redcal(data, additivein, stdev=stdev, nthread=nthread, verbose=verbose, uselogcal=0)
-    def logcal(self, data, additivein, stdev=None, nthread=None, verbose=False):
-    #NOTE: logcal currently is not taking advantage of stdev, only using stdev in calculating chi^2.
-    #To add that we need to add stdev into th calculation of At and AtAi and B counterparts in info calculation. No need to touch C++ code.
+        return self._redcal(data, additivein, nthread=nthread, verbose=verbose, uselogcal=0, uselincal=1)
+    def logcal(self, data, additivein, nthread=None, verbose=False):
         '''XXX DOCSTRING'''
-        return self._redcal(data, additivein, stdev=stdev, nthread=nthread, verbose=verbose, uselogcal=1)
+        return self._redcal(data, additivein, nthread=nthread, verbose=verbose, uselogcal=1, uselincal=0)
     def _redcal_multithread(self, data, additivein, uselogcal, nthread, verbose = False):
         '''XXX DOCSTRING'''
         nthread = min(nthread, self.nFrequency)
@@ -1055,7 +1166,7 @@ def raw_calibrate(data, info, initant, solution_path, additional_solution_path, 
         #print solution[-1]
         #print calpar[solution[-1][solution[-1][-1]]][0], ((solution[-1][-1]-0.5)/-.5),d[solution[-1][2]] , ubl_phase * (solution[-1][-2]), calpar[solution[-1][1-solution[-1][-1]]]
 
-    calpar = (np.array(calpar).flatten() + PI) % TPI - PI
+    calpar = (np.array(calpar).flatten() + np.pi) % (2 * np.pi) - np.pi
     #remove the effect of enforcing the two bls to be 0, rather, set the first two linearly independent antennas w.r.t initant to be 0
 
     calpar = calpar - degeneracy_remove[2].dot([calpar[degeneracy_remove[0]],calpar[degeneracy_remove[1]]])
@@ -1117,8 +1228,9 @@ def solve_slope(A_in, b_in, tol, niter=30, step=1, verbose=False):
     '''solve for the solution vector x such that mod(A.x, 2pi) = b,
     where the values range from -p to p. solution will be seeked
     on the first axis of b'''
+    p = np.pi
     A = np.array(A_in)
-    b = np.array(b_in + PI) % TPI - PI
+    b = np.array(b_in + p) % (2*p) - p
     if A.ndim != 2: raise TypeError("A matrix must be 2 dimensional. Input A is %i dimensional."%A.ndim)
     if A.shape[0] != b.shape[0]: raise TypeError("A and b has shape mismatch: %s and %s."%(A.shape, b.shape))
     if A.shape[1] != 2: raise TypeError("A matrix's second dimension must have size of 2. %i inputted."%A.shape[1])
@@ -1195,7 +1307,7 @@ def solve_slope(A_in, b_in, tol, niter=30, step=1, verbose=False):
         print coarseA
         print result
     for i in range(niter):
-        result = result + step * iA.dot(A.transpose().dot((b - A.dot(result) + PI)%TPI - PI))
+        result = result + step * iA.dot(A.transpose().dot((b - A.dot(result) + p)%(2*p)-p))
         if verbose: print result
     if extra_shape is not None: result.shape = tuple(np.concatenate(([2], extra_shape)))
     return result
@@ -1370,4 +1482,3 @@ def deconvolve_spectra2(spectra, window, band_limit, var=None, correction_weight
     deconv_fdata = (mmi.dot(m.transpose().conjugate()) * Ni).dot(spectra*mult_window)
     model_fdata = m.dot(deconv_fdata)
     return deconv_fdata, np.linalg.norm(model_fdata-spectra*mult_window, axis = 0), model_fdata-spectra*mult_window, mmi
-
